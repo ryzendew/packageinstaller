@@ -7,6 +7,10 @@
 // The "pacman" verb exists for paru, which is started with this helper in place of
 // sudo. It accepts only the three operations paru uses to install what it built, so
 // that one authentication covers a whole build instead of one per step.
+//
+// One more verb ranks the mirrors with cachyos-rate-mirrors, which takes no arguments.
+
+#include "shared.hpp"
 
 #include <cerrno>   // for errno, EINTR
 #include <csignal>  // for signal
@@ -36,6 +40,8 @@ using namespace std::string_view_literals;
 namespace {
 
 constexpr auto kPacman = "/usr/bin/pacman";
+// what the command for it starts with, as "pacman" does for pacman
+constexpr auto kRateMirrors = "cachyos-rate-mirrors";
 
 // pkexec itself answers 126 and 127 when the user is not let through
 constexpr int kRefused    = 2;
@@ -101,7 +107,7 @@ auto resolve_package_file(std::string_view given) noexcept -> std::optional<std:
 }
 
 auto usage() noexcept -> std::optional<Args> {
-    std::println(stderr, "usage: cachyos-pi-helper install <pkg>... | remove <pkg>... | upgrade\n"
+    std::println(stderr, "usage: cachyos-pi-helper install <pkg>... | remove <pkg>... | upgrade | rate-mirrors\n"
                          "       cachyos-pi-helper pacman --sync|--upgrade|--database [options] -- <target>...");
     return std::nullopt;
 }
@@ -180,6 +186,9 @@ auto pacman_command(Arguments arguments) noexcept -> std::optional<Args> {
     if (verb == "upgrade"sv && rest.empty()) {
         return Args{"pacman", "-Syu", "--noconfirm"};
     }
+    if (verb == "rate-mirrors"sv && rest.empty()) {
+        return Args{kRateMirrors};
+    }
     if (verb == "pacman"sv) {
         return pacman_for_paru(rest);
     }
@@ -195,23 +204,25 @@ auto c_strings(std::span<std::string> strings) noexcept -> std::vector<char*> {
     return pointers;
 }
 
-auto pacman_path() noexcept -> const char* {
+/// The program a command names with its first word: pacman, or the mirror ranking.
+auto program_path(std::string_view name) noexcept -> std::string {
 #ifdef PI_HELPER_TESTING
-    if (const char* fake = std::getenv("CACHYOS_PI_HELPER_PACMAN"); fake != nullptr) {
-        return fake;
+    // the tests keep stand-ins for both programs in one directory
+    if (const char* directory = std::getenv("CACHYOS_PI_HELPER_BINDIR"); directory != nullptr) {
+        return std::string{directory} + '/' + std::string{name};
     }
 #endif
-    return kPacman;
+    return name == kRateMirrors ? helper::RATE_MIRRORS : kPacman;
 }
 
-[[noreturn]] void exec_in_own_session(char* const* argv, char* const* envp) noexcept {
+[[noreturn]] void exec_in_own_session(const char* program, char* const* argv, char* const* envp) noexcept {
     // out of reach of the caller's terminal and of a signal to its process group
     if (setsid() < 0) {
         std::println(stderr, "cachyos-pi-helper: cannot start a session: {}", std::generic_category().message(errno));
         _exit(kNotStarted);
     }
-    execve(pacman_path(), argv, envp);
-    std::println(stderr, "cachyos-pi-helper: cannot run pacman: {}", std::generic_category().message(errno));
+    execve(program, argv, envp);
+    std::println(stderr, "cachyos-pi-helper: cannot run {}: {}", program, std::generic_category().message(errno));
     _exit(kNotStarted);
 }
 
@@ -228,6 +239,9 @@ auto exit_status_of(pid_t child) noexcept -> int {
 auto run(Args& args) noexcept -> int {
     // TODO(vnepogodin): copy gucc code into here for now
     std::array environment{"PATH=/usr/bin"s, "LC_ALL=C.UTF-8"s};
+    const auto program = program_path(args.front());
+    // the app tells a refused authentication by the absence of this line
+    std::println(stderr, "{}{}", helper::STARTED, args | std::ranges::views::join_with(' ') | std::ranges::to<std::string>());
     const auto argv = c_strings(args);
     const auto envp = c_strings(environment);
 
@@ -241,7 +255,7 @@ auto run(Args& args) noexcept -> int {
         return kNotStarted;
     }
     if (child == 0) {
-        exec_in_own_session(argv.data(), envp.data());
+        exec_in_own_session(program.c_str(), argv.data(), envp.data());
     }
     return exit_status_of(child);
 }
